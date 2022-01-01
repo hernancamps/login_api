@@ -9,6 +9,7 @@ from pydantic.types import UUID4, Json, StrictBool, StrictBytes, StrictStr
 import re
 import logging
 import base64
+from functools import wraps
 
 reg = "^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*#?&])[A-Za-z\d@$!#%*?&]{6,20}$"
 pattern = re.compile(reg)
@@ -16,12 +17,12 @@ pattern = re.compile(reg)
 logger = logging.getLogger("default")
 
 class User(BaseModel):
-    id: UUID
+    id: StrictStr
     username: StrictStr
     email: EmailStr
     password_hash: StrictStr
     enabled: StrictBool
-    token_to_enable: UUID
+    token_to_enable: StrictStr
 
     @validator("username")
     def valid_username(cls, v):
@@ -41,6 +42,7 @@ class DbInterface:
     def __init__(self, file_name="db.json"):
         self.__users = JsonDb()
         self.file_name = file_name
+        self.save_to_file()
 
     def json(self):
         """
@@ -88,6 +90,7 @@ class DbInterface:
         Returns:
             bool True if the user exists False if it doesn't
         """
+        self.read_from_file()
         return username in [u.username for u in self.__users.users]
 
     def user_exists_and_is_enabled(self, user_name: str) -> bool:
@@ -98,6 +101,7 @@ class DbInterface:
         Returns:
             bool true if it exists false otherwise
         """
+        self.read_from_file()
         if len(self.__users.users) == 0:
             return False
         return user_name in [u.username for u in self.__users.users if u.enabled is True]
@@ -116,6 +120,7 @@ class DbInterface:
             ValueError This should never happen, if it does it means that there are two
             users with the same username in the db
         """
+        self.read_from_file()
         if include_disabled:
             if not self.user_exists(user_name):
                 return None
@@ -135,12 +140,14 @@ class DbInterface:
         This sets the user from enabled to disabled
         user_name: a str representation of the user
         """
+        self.read_from_file()
         if self.user_exists_and_is_enabled(user_name):
             self.get_user(user_name).enabled = False
         else:
             logger.error("user does not exist or is disabled: {username}".format(username=user_name))
             raise ValueError("user does not exist or is already disabled")
-        
+        self.save_to_file()
+
     def verify_password(self, username: str, password:str) -> bool:
         """
         This takes the username for the user and it's password,
@@ -153,6 +160,7 @@ class DbInterface:
         Raises:
             UserValidationException if the user does not exist or is not enabled
         """
+        self.read_from_file()
         if not self.user_exists_and_is_enabled(username):
             raise UserValidationException("the requested user does not exist or is not enabled")
         user = self.get_user(username)
@@ -166,12 +174,12 @@ class DbInterface:
         Returns:
             bool
         """
+        self.read_from_file
         if len(self.__users.users) == 0:
             return False
         return email in [u.email for u in self.__users.users]
     
-
-    def create_user(self, user_name: str, email: str,password:str) -> Tuple[bool, UUID4]:
+    def create_user(self, user_name: str, email: str,password:str) -> Tuple[bool, str]:
         """
         It verifies that the user and the password are in compliance, if they are
         it creates the user with a hashed password and marked as enabled.
@@ -185,6 +193,7 @@ class DbInterface:
             ValidationError if there is a problem with the actual user
             creation once it has been validated
         """
+        self.read_from_file()
         try:
             self.verify_user_compliance(user_name, email)
             self.verify_password_compliance(password)
@@ -197,17 +206,18 @@ class DbInterface:
         try:
             password_hash = self.hash_password(password)
             user_to_add = User(
-                id=uuid4(),
+                id=str(uuid4()),
                 username=user_name,
                 email=email,enabled=False, 
                 password_hash=password_hash,
-                token_to_enable=uuid4())
+                token_to_enable=str(uuid4()))
             self.__users.users.append(user_to_add)
+            self.save_to_file()
             return (True, user_to_add.token_to_enable)
         except ValidationError as e:
             logger.error("there was an error while hashing")
             raise
-
+    
     def verify_user_compliance(self, user_name, email):
         """
         If checks if the user_name and the email are in compliance with the rules.
@@ -220,10 +230,12 @@ class DbInterface:
         Raises:
             UserValidationException if the user or the Email exist
         """
+        self.read_from_file()
         if self.user_exists(user_name):
             raise UserValidationException("The user already exists")
         if self.mail_exists(email):
             raise UserValidationException("This mail is already registered")
+        self.save_to_file()
         return True
 
     def verify_password_compliance(self, password):
@@ -239,6 +251,7 @@ class DbInterface:
             PasswordValidationException a comfy message with the rule that is not being 
             met 
         """
+        self.read_from_file()
         if len(password) < 8:
             raise PasswordValidationException("password length must be higher than 8")
         if len(password) >= 128:
@@ -276,12 +289,14 @@ class DbInterface:
             UserValidationException if the user does not exist
             UsernamePasswordMismatchException if the username password combination is not correct
         """
+        self.read_from_file()
         if not self.get_user(username):
             raise UserValidationException("user does not exist")
         if not self.verify_password(username,old_pass):
             raise UsernamePasswordMismatchException("the old password is not correct")
         self.verify_password_compliance(new_pass)
         self.get_user(username).password_hash = self.hash_password(new_pass)
+        self.save_to_file()
         return True
 
     def modify_email(self, username, password, new_email) -> bool:
@@ -303,6 +318,7 @@ class DbInterface:
             UsernamePasswordMismatchException if the username password combination
             is incorrect
         """
+        self.read_from_file()
         if not self.user_exists_and_is_enabled(username):
             raise UserValidationException("You are trying to modify an inexistent user")
         if not self.verify_password(username, password):
@@ -310,15 +326,16 @@ class DbInterface:
         if self.mail_exists(new_email):
             raise UserValidationException("Mail already exists")
         self.get_user(username).email == new_email
+        self.save_to_file()
         return True
     
-
     def validate_email(self, username: str, token: str):
         """
         It compares the token against the one stored in the db.
         It it matches it returns true, else it returns False
 
         """
+        self.read_from_file()
         user = self.get_user(username, True)
         if str(user.token_to_enable) == token:
             return True
@@ -328,6 +345,10 @@ class DbInterface:
         """
         It enables the offered username
         """
+        self.read_from_file()
         user = self.get_user(username, True)
+        if user is None:
+            raise UserValidationException("the required user does not exist")
         user.enabled = True
+        self.save_to_file()
         
