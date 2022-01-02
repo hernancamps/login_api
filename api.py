@@ -1,3 +1,4 @@
+import base64
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 from flask import Flask, request, make_response
@@ -6,7 +7,7 @@ import jwt
 from db import DbInterface
 from db.db_exceptions import *
 from request_validations.validations import *
-
+import json
 import os
 import logging
 
@@ -51,7 +52,10 @@ def create_app(db_name:Optional[str]=None, testing: bool=False) -> Flask:
             validated_request = RegistrationRequestValidation(**req)
         except ValidationError as v:
             return make_response(v.json(), 400)
-        created, token = db.create_user(validated_request.username, validated_request.email, validated_request.password)
+        try:
+            created, token = db.create_user(validated_request.username, validated_request.email, validated_request.password)
+        except PasswordValidationException:
+            return make_response("please follow password policy", 409)
         if created:
             if testing:
                 return make_response(str(token), 201)
@@ -72,15 +76,17 @@ def create_app(db_name:Optional[str]=None, testing: bool=False) -> Flask:
             validated_request = LoginRequestValidation(**req)
         except ValidationError as v:
             return make_response(v.json(), 400)
-        
-        if not db.verify_password(validated_request.username, validated_request.password):
-            logger.error("incorrect login attempt for user {username}".format(username=validated_request.username))
+        try:
+            if db.verify_password(validated_request.username, validated_request.password):
+                encoded_jwt = jwt.encode({"username":validated_request.username, 
+                                    "exp":datetime.now(tz=timezone.utc)+timedelta(minutes=60)}, 
+                                    JWT_SECRET)
+                return make_response(encoded_jwt, 200)
+            if not db.verify_password(validated_request.username, validated_request.password):
+                logger.error("incorrect login attempt for user {username}".format(username=validated_request.username))
+                return make_response("The username/password combination is incorrect", 403)    
+        except UserValidationException:
             return make_response("The username/password combination is incorrect", 403)
-        elif db.verify_password(validated_request.username, validated_request.password):
-            encoded_jwt = jwt.encode({"username":validated_request.username, 
-                                "exp":datetime.now(tz=timezone.utc)+timedelta(minutes=60)}, 
-                                JWT_SECRET)
-            return make_response(encoded_jwt, 200)
         return make_response("error", 500)
 
     @app.route("/puedoPasar", methods=["POST"])
@@ -146,10 +152,12 @@ def create_app(db_name:Optional[str]=None, testing: bool=False) -> Flask:
 
     @app.route("/verifyEmail", methods=["GET"])
     def verify_email():
-        username = request.args.get("username")
         token = request.args.get("token")
-        if db.validate_email(username, token):
-            db.enable_user(username)
+        base64_decoded = base64.b64decode(token).decode()
+        dict_base_64 = json.loads(base64_decoded) 
+        user = dict_base_64["username"]
+        if db.validate_email(user, token):
+            db.enable_user(user)
             return make_response("ok", 200)
         else:
             return make_response("This token is not correct", 409)
@@ -157,6 +165,6 @@ def create_app(db_name:Optional[str]=None, testing: bool=False) -> Flask:
     return app
 
 if __name__ == "__main__":
-    app = create_app()
+    app = create_app(testing=True)
     app.debug = True
     app.run()

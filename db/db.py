@@ -10,6 +10,7 @@ import re
 import logging
 import base64
 from functools import wraps
+import json 
 
 reg = "^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*#?&])[A-Za-z\d@$!#%*?&]{6,20}$"
 pattern = re.compile(reg)
@@ -202,15 +203,17 @@ class DbInterface:
             return (False, None)
         except PasswordValidationException:
             logger.error("password does not comply with rules")
-            return (False, None)
+            raise
         try:
             password_hash = self.hash_password(password)
+            token_to_enable=json.dumps({"username":user_name, "token":str(uuid4())})
+            base64_encoded_token = base64.b64encode(token_to_enable.encode()).decode()
             user_to_add = User(
                 id=str(uuid4()),
                 username=user_name,
                 email=email,enabled=False, 
                 password_hash=password_hash,
-                token_to_enable=str(uuid4()))
+                token_to_enable=base64_encoded_token)
             self.__users.users.append(user_to_add)
             self.save_to_file()
             return (True, user_to_add.token_to_enable)
